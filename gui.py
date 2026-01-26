@@ -4,6 +4,7 @@
 import streamlit as st
 import pandas as pd
 import time
+import datetime
 import os
 import sqlite3
 import stock_radar  # 引用你的主程序
@@ -291,7 +292,7 @@ class StreamlitRadar(stock_radar.StockRadarPro):
             return None
 
         for _, row in concepts.iterrows():
-            c_name = row.get('板块名称', '未知')
+            c_name = row.get('板块', '未知')
             c_pct = row['涨跌幅']
 
             # 获取成分股数据
@@ -304,22 +305,25 @@ class StreamlitRadar(stock_radar.StockRadarPro):
 
     def get_concept_stocks_data(self, concept_name, valid_boards):
         """
-        复用 deep_dive_concept 的逻辑，但只返回数据列表
+        获取板块个股数据 (修改版：增加兜底机制)
+        如果策略没选出票，自动返回前5名作为观察
         """
         try:
-            # 1. 获取数据 (保持不变)
+            # 1. 获取数据
             df = pd.DataFrame()
             try:
-                df = stock_radar.ak.stock_board_concept_cons_ths(symbol=concept_name)
-            except:
+                df = stock_radar.ak.stock_board_industry_cons_em(symbol=concept_name)
+            except Exception as e:
+                print(f"获取获取板块{concept_name}个股数据数据失败: {e}")
                 try:
                     df = stock_radar.ak.stock_board_concept_cons_em(symbol=concept_name)
-                except:
+                except Exception as e:
+                    print(f"获取获取板块{concept_name}概念个股数据数据失败: {e}")
                     pass
 
             if df.empty: return []
 
-            # 2. 数据清洗 (保持不变)
+            # 2. 数据清洗
             cols = ['涨跌幅', '现价', '最高', '最低', '换手', '量比']
             for col in cols:
                 if col in df.columns:
@@ -328,9 +332,9 @@ class StreamlitRadar(stock_radar.StockRadarPro):
             # 排序：取前10名
             df_sorted = df.sort_values(by="涨跌幅", ascending=False).head(10)
 
-            clean_data = []
+            clean_data = []  # 存放【符合策略】的票
+            fallback_data = []  # 存放【前排兜底】的票 (用于没票时展示)
 
-            # 获取第一行的索引值，用于判断龙头 (比 enumerate 更准确)
             leader_index = df_sorted.index[0] if not df_sorted.empty else None
 
             for index, row in df_sorted.iterrows():
@@ -342,8 +346,6 @@ class StreamlitRadar(stock_radar.StockRadarPro):
                 low = row.get('最低', price)
                 turnover = row.get('换手', 0)
 
-                # 生成跳转链接 (建议所有股票都加链接)
-                # 注意：这里需要确保 gui.py 里已经定义了 get_kline_url
                 stock_url = get_kline_url(code)
 
                 # 判定板块归属
@@ -355,51 +357,20 @@ class StreamlitRadar(stock_radar.StockRadarPro):
                 elif code.startswith("8") or code.startswith("4"):
                     current_board = "北交所 (8/4)"
 
-                # 判断是否有权限交易
                 can_trade = current_board in valid_boards
-
-                # 判定龙头逻辑：是否为排序后的第一名
                 is_market_leader = (index == leader_index)
 
-                # ============================================
-                # 🛡️ 核心展示逻辑优化
-                # ============================================
-
-                # 【情况A】: 它是总龙头，但我买不了 -> 必须显示，作为“锚”
-                if is_market_leader and not can_trade:
-                    clean_data.append({
-                        "代码": stock_url,  # 优化：即使买不了，加上链接方便点进去看行情
-                        "名称": f"🔒 {name}",  # 加锁标记
-                        "涨幅": f"{pct:.2f}%",
-                        "现价": price,
-                        "状态": "👑 总龙(锚)",  # 明确状态
-                        "策略": "风向标",
-                        "换手%": f"{turnover:.1f}"
-                    })
-                    continue  # 展示完直接跳过后续策略筛选
-
-                # 【情况B】: 既不是龙头，我也买不了 -> 直接过滤，不看
-                if not can_trade:
-                    continue
-
-                # 【情况C】: 我能买的股票 -> 进入常规筛选
-                # (你原代码这里有一段重复的 if current_board not in valid_boards，已删除)
-
                 if "ST" in name: continue
-
                 threshold = self._get_limit_threshold(code, name)
 
                 # 剔除一字板
-                if self._is_one_word_board(high, low, pct, threshold):
-                    continue
-
-                strategy_ids = StrategyFilter.normalize_strategy_ids(stock_radar.CURRENT_STRATEGY)
+                is_one_word = self._is_one_word_board(high, low, pct, threshold)
 
                 # 策略筛选
                 is_selected = True
                 tag = "观察"
+                strategy_ids = StrategyFilter.normalize_strategy_ids(stock_radar.CURRENT_STRATEGY)
 
-                # 调用 strategies.py
                 if strategy_ids:
                     is_selected, tag = StrategyFilter.apply_strategies(row, threshold, strategy_ids)
 
@@ -413,24 +384,45 @@ class StreamlitRadar(stock_radar.StockRadarPro):
                 elif pct > 8.0:
                     status = "⚡ 冲击"
 
-                # 最终添加
-                if is_selected or not strategy_ids:
-                    clean_tag = tag.replace("🚀", "").replace("🐟", "").replace("⚡", "").strip()
+                # 构造基础数据项
+                clean_tag = tag.replace("🚀", "").replace("🐟", "").replace("⚡", "").strip()
+                item_data = {
+                    "代码": stock_url,
+                    "名称": name,
+                    "涨幅": f"{pct:.2f}%",
+                    "现价": price,
+                    "状态": status,
+                    "策略": clean_tag,
+                    "换手%": f"{turnover:.1f}"
+                }
 
-                    clean_data.append({
-                        "代码": stock_url,  # 已经是链接了
-                        "名称": name,
-                        "涨幅": f"{pct:.2f}%",
-                        "现价": price,
-                        "状态": status,
-                        "策略": clean_tag,
-                        "换手%": f"{turnover:.1f}"
-                    })
+                # --- 分流逻辑 ---
 
-            return clean_data
+                # 1. 正常符合策略的 (且能交易、不是一字板)
+                if is_selected and can_trade and not is_one_word:
+                    clean_data.append(item_data)
+
+                # 2. 收集前5名做兜底 (不管符不符合策略，只要能交易)
+                if len(fallback_data) < 5:
+                    fallback_item = item_data.copy()
+                    # 如果这只票并不符合策略，强行改标签，方便前端识别
+                    if not (is_selected and not is_one_word):
+                        fallback_item['策略'] = "👀 板块前排"
+
+                    # 标记不可交易的
+                    if not can_trade:
+                        fallback_item['名称'] = f"🔒 {name}"
+
+                    fallback_data.append(fallback_item)
+
+            # --- 最终返回 ---
+            # 如果有策略选出的票，就返回策略票；否则返回兜底的前排票
+            if clean_data:
+                return clean_data
+            else:
+                return fallback_data
 
         except Exception as e:
-            # st.error 可能会在非 GUI 线程报错，建议用 print 或直接 return
             print(f"数据解析错误: {e}")
             return []
 
@@ -552,11 +544,24 @@ else:
             st.warning("暂未获取到有效热点数据，可能是休市或接口波动。")
         else:
             # 遍历板块
+            # 遍历板块
             for bk_name, df in data_map.items():
                 with st.expander(f"📂 {bk_name}", expanded=True):
                     if df.empty:
                         st.caption("该板块暂无符合当前策略的个股")
                     else:
+                        # === 🟢 新增逻辑：检测是否为兜底数据 ===
+                        # 检查 '策略' 列是否包含 '板块前排' 这个关键词
+                        is_fallback = False
+                        if '策略' in df.columns:
+                            is_fallback = df['策略'].astype(str).str.contains("板块前排").any()
+
+                        if is_fallback:
+                            st.warning("⚠️ 暂无符合【严格策略】的个股，以下为该板块【涨幅前 5】观察：")
+
+
+                        # ======================================
+
                         # 高亮显示逻辑
                         def highlight_status(val):
                             color = ''
@@ -575,7 +580,6 @@ else:
                                 "代码": st.column_config.LinkColumn(
                                     "股票代码",
                                     help="点击跳转东方财富K线图",
-                                    # 正则表达式：从URL中提取6位数字作为显示文本
                                     display_text=r"(\d{6})\.html",
                                     width="medium"
                                 )
