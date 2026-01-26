@@ -71,6 +71,12 @@ class DBManager:
         conn = self.get_conn()
         c = conn.cursor()
         try:
+            # 同一天同一股票去重：只保留最新一条
+            c.execute('''
+                DELETE FROM stock_candidates
+                WHERE date = ? AND code = ?
+            ''', (date, code))
+
             now_time = datetime.datetime.now().strftime("%H:%M:%S")
             c.execute('''
                 INSERT INTO stock_candidates (date, code, name, strategy, concept, price, pct, timestamp)

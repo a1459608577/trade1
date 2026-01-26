@@ -38,6 +38,48 @@ class StrategyFilter:
         return (high - low) / pre_close * 100
 
     @staticmethod
+    def normalize_strategy_ids(strategy):
+        """将策略配置规范为有序ID列表，空列表代表不筛选"""
+        if strategy is None:
+            return []
+        if isinstance(strategy, (list, tuple, set)):
+            ids = []
+            for item in strategy:
+                try:
+                    sid = int(item)
+                except (TypeError, ValueError):
+                    continue
+                if sid in (1, 2, 3):
+                    ids.append(sid)
+            return sorted(set(ids))
+        try:
+            sid = int(strategy)
+        except (TypeError, ValueError):
+            return []
+        if sid in (1, 2, 3):
+            return [sid]
+        return []
+
+    @staticmethod
+    def apply_strategies(row, limit_threshold, strategy_ids):
+        """多策略联合筛选，命中任意策略即返回 True"""
+        tags = []
+        for sid in strategy_ids:
+            if sid == 1:
+                ok, tag = StrategyFilter.check_strong_chase(row, limit_threshold)
+            elif sid == 2:
+                ok, tag = StrategyFilter.check_tail_end_lurk(row, limit_threshold)
+            elif sid == 3:
+                ok, tag = StrategyFilter.check_weak_to_strong(row, limit_threshold)
+            else:
+                ok, tag = False, ""
+            if ok:
+                tags.append(tag)
+        if tags:
+            return True, " / ".join(tags)
+        return False, ""
+
+    @staticmethod
     def check_strong_chase(row, limit_threshold):
         """
         策略 1: 【早盘强势追涨】(Pro版)

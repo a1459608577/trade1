@@ -4,6 +4,8 @@
 import streamlit as st
 import pandas as pd
 import time
+import os
+import sqlite3
 import stock_radar  # 引用你的主程序
 from sentiment import MarketSentiment
 from strategies import StrategyFilter
@@ -21,6 +23,226 @@ def get_kline_url(code):
         prefix = "bj"
 
     return f"https://quote.eastmoney.com/{prefix}{code}.html"
+
+STRATEGY_LABELS = {
+    1: "强势追涨",
+    2: "尾盘潜伏",
+    3: "冲击涨停"
+}
+
+
+def _fmt_pct(value):
+    if value is None:
+        return "-"
+    return f"{value:.2f}%"
+
+
+def _fmt_num(value):
+    if value is None:
+        return "-"
+    return f"{value:.2f}"
+
+
+def _extract_strategy_ids(text, fallback_ids):
+    if not text:
+        return list(fallback_ids)
+    ids = []
+    for sid, label in STRATEGY_LABELS.items():
+        if label in str(text):
+            ids.append(sid)
+    return ids if ids else list(fallback_ids)
+
+
+def _evaluate_strategy_confirm(strategy_id, open_pct, volume_ratio, pullback_pct, above_pre_close):
+    if above_pre_close is False:
+        return "fail"
+
+    conditions = []
+
+    if strategy_id == 1:
+        open_range = (-0.5, 3.5)
+        volume_min = 1.2
+        pullback_max = 1.8
+        if open_pct is not None:
+            conditions.append(open_range[0] <= open_pct <= open_range[1])
+        if volume_ratio is not None and volume_ratio > 0:
+            conditions.append(volume_ratio >= volume_min)
+        if pullback_pct is not None:
+            conditions.append(pullback_pct <= pullback_max)
+    elif strategy_id == 2:
+        open_range = (-1.0, 1.5)
+        volume_range = (0.8, 2.0)
+        pullback_max = 2.5
+        if open_pct is not None:
+            conditions.append(open_range[0] <= open_pct <= open_range[1])
+        if volume_ratio is not None and volume_ratio > 0:
+            conditions.append(volume_range[0] <= volume_ratio <= volume_range[1])
+        if pullback_pct is not None:
+            conditions.append(pullback_pct <= pullback_max)
+    elif strategy_id == 3:
+        open_range = (2.0, 6.0)
+        volume_min = 1.4
+        pullback_max = 1.2
+        if open_pct is not None:
+            conditions.append(open_range[0] <= open_pct <= open_range[1])
+        if volume_ratio is not None and volume_ratio > 0:
+            conditions.append(volume_ratio >= volume_min)
+        if pullback_pct is not None:
+            conditions.append(pullback_pct <= pullback_max)
+
+    if above_pre_close is not None:
+        conditions.append(above_pre_close)
+
+    if not conditions:
+        return "watch"
+
+    passed = sum(1 for ok in conditions if ok)
+    if passed == len(conditions):
+        return "pass"
+    if passed >= len(conditions) - 1:
+        return "watch"
+    return "fail"
+
+
+def _aggregate_confirm_status(strategy_ids, open_pct, volume_ratio, pullback_pct, above_pre_close):
+    status_map = {}
+    for sid in strategy_ids:
+        status_map[sid] = _evaluate_strategy_confirm(
+            sid,
+            open_pct,
+            volume_ratio,
+            pullback_pct,
+            above_pre_close
+        )
+
+    if any(status == "pass" for status in status_map.values()):
+        overall = "✅通过"
+    elif any(status == "watch" for status in status_map.values()):
+        overall = "🟡观察"
+    else:
+        overall = "❌放弃"
+
+    detail_parts = []
+    for sid in strategy_ids:
+        label = STRATEGY_LABELS.get(sid, str(sid))
+        status = status_map.get(sid, "watch")
+        icon = "✅" if status == "pass" else ("🟡" if status == "watch" else "❌")
+        detail_parts.append(f"{label}{icon}")
+
+    return overall, " / ".join(detail_parts)
+
+
+def _fetch_spot_for_codes(codes):
+    if not codes:
+        return pd.DataFrame()
+    df = pd.DataFrame()
+    try:
+        df = stock_radar.ak.stock_zh_a_spot_em()
+    except Exception:
+        try:
+            df = stock_radar.ak.stock_zh_a_spot()
+        except Exception:
+            return pd.DataFrame()
+    if df.empty or "代码" not in df.columns:
+        return pd.DataFrame()
+    return df[df["代码"].astype(str).isin(codes)].copy()
+
+
+def build_t1_confirmation(db_path, fallback_strategy_ids):
+    if not os.path.exists(db_path):
+        return pd.DataFrame(), "数据库不存在，无法生成次日确认。"
+
+    conn = sqlite3.connect(db_path)
+    try:
+        candidates = pd.read_sql_query(
+            """
+            SELECT date, code, name, strategy, price, pct, timestamp
+            FROM stock_candidates
+            WHERE date = (SELECT MAX(date) FROM stock_candidates)
+            ORDER BY timestamp DESC
+            """,
+            conn
+        )
+    finally:
+        conn.close()
+
+    if candidates.empty:
+        return pd.DataFrame(), "暂无历史选股记录。"
+
+    candidates = candidates.drop_duplicates(subset=["code"]).head(50)
+    codes = candidates["code"].astype(str).tolist()
+
+    spot_df = _fetch_spot_for_codes(codes)
+    if spot_df.empty:
+        return pd.DataFrame(), "未能获取实时行情数据。"
+
+    for col in ["最新价", "今开", "昨收", "最高", "最低", "量比", "涨跌幅"]:
+        if col in spot_df.columns:
+            spot_df[col] = pd.to_numeric(spot_df[col], errors="coerce")
+
+    spot_map = spot_df.set_index(spot_df["代码"].astype(str)).to_dict(orient="index")
+    results = []
+
+    for _, row in candidates.iterrows():
+        code = str(row["code"])
+        name = row["name"]
+        strategy_text = row.get("strategy", "")
+        spot = spot_map.get(code)
+
+        if not spot:
+            results.append({
+                "代码": code,
+                "名称": name,
+                "策略": strategy_text,
+                "开盘%": "-",
+                "量比": "-",
+                "回撤%": "-",
+                "站上昨收": "-",
+                "确认策略": "-",
+                "结论": "❔无行情"
+            })
+            continue
+
+        open_price = spot.get("今开")
+        pre_close = spot.get("昨收")
+        latest = spot.get("最新价")
+        high = spot.get("最高")
+        volume_ratio = spot.get("量比")
+
+        open_pct = None
+        if pre_close and pre_close > 0 and open_price:
+            open_pct = (open_price - pre_close) / pre_close * 100
+
+        pullback_pct = None
+        if latest and latest > 0 and high:
+            pullback_pct = (high - latest) / latest * 100
+
+        above_pre_close = None
+        if pre_close and pre_close > 0 and latest:
+            above_pre_close = latest >= pre_close
+
+        strategy_ids = _extract_strategy_ids(strategy_text, fallback_strategy_ids)
+        overall_status, detail_status = _aggregate_confirm_status(
+            strategy_ids,
+            open_pct,
+            volume_ratio,
+            pullback_pct,
+            above_pre_close
+        )
+
+        results.append({
+            "代码": code,
+            "名称": name,
+            "策略": strategy_text,
+            "开盘%": _fmt_pct(open_pct),
+            "量比": _fmt_num(volume_ratio),
+            "回撤%": _fmt_pct(pullback_pct),
+            "站上昨收": "是" if above_pre_close else ("否" if above_pre_close is False else "-"),
+            "确认策略": detail_status,
+            "结论": overall_status
+        })
+
+    return pd.DataFrame(results), ""
 # ==========================================
 # 🎨 页面配置 (Page Config)
 # ==========================================
@@ -49,12 +271,12 @@ st.markdown("""
 # ==========================================
 # 我们继承原有的类，但重写 output 方法，让它返回 DataFrame 而不是打印文字
 class StreamlitRadar(stock_radar.StockRadarPro):
-    def get_raw_data(self, strategy_id, valid_boards):
+    def get_raw_data(self, strategy_ids, valid_boards):
         """
         获取原始数据，用于前端渲染
         """
         # 1. 设置策略
-        stock_radar.CURRENT_STRATEGY = strategy_id
+        stock_radar.CURRENT_STRATEGY = strategy_ids
 
         # 2. 刷新数据
         if not self.zt_data:
@@ -171,17 +393,15 @@ class StreamlitRadar(stock_radar.StockRadarPro):
                 if self._is_one_word_board(high, low, pct, threshold):
                     continue
 
+                strategy_ids = StrategyFilter.normalize_strategy_ids(stock_radar.CURRENT_STRATEGY)
+
                 # 策略筛选
                 is_selected = True
                 tag = "观察"
 
                 # 调用 strategies.py
-                if stock_radar.CURRENT_STRATEGY == 1:
-                    is_selected, tag = StrategyFilter.check_strong_chase(row, threshold)
-                elif stock_radar.CURRENT_STRATEGY == 2:
-                    is_selected, tag = StrategyFilter.check_tail_end_lurk(row, threshold)
-                elif stock_radar.CURRENT_STRATEGY == 3:
-                    is_selected, tag = StrategyFilter.check_weak_to_strong(row, threshold)
+                if strategy_ids:
+                    is_selected, tag = StrategyFilter.apply_strategies(row, threshold, strategy_ids)
 
                 # 状态标记
                 status = "普通"
@@ -194,7 +414,7 @@ class StreamlitRadar(stock_radar.StockRadarPro):
                     status = "⚡ 冲击"
 
                 # 最终添加
-                if is_selected or stock_radar.CURRENT_STRATEGY == 0:
+                if is_selected or not strategy_ids:
                     clean_tag = tag.replace("🚀", "").replace("🐟", "").replace("⚡", "").strip()
 
                     clean_data.append({
@@ -219,20 +439,59 @@ class StreamlitRadar(stock_radar.StockRadarPro):
 # 🖥️ 界面渲染 (UI Rendering)
 # ==========================================
 
+# 初始化
+if 'radar' not in st.session_state:
+    st.session_state.radar = StreamlitRadar()
+
+# 预先获取情绪，供侧边栏策略自动切换使用
+with st.spinner('正在侦测大盘情绪...'):
+    mood_data = MarketSentiment.check_mood(st.session_state.radar.today)
+
+    try:
+        if isinstance(mood_data, int):  # 旧版只返回 int
+            sh_pct = 0.0
+            premium = 0.0
+            level = mood_data
+        else:
+            sh_pct = mood_data.get('sh_pct', 0)
+            premium = mood_data.get('premium', 0)
+            level = mood_data.get('level', 0)
+    except:
+        sh_pct = 0
+        premium = 0
+        level = 0
+
 # 1. 侧边栏：控制台
 with st.sidebar:
     st.header("🎮 操盘控制台")
 
+    if "auto_strategy" not in st.session_state:
+        st.session_state.auto_strategy = True
+    if "no_filter" not in st.session_state:
+        st.session_state.no_filter = False
+    if "selected_strategies" not in st.session_state:
+        st.session_state.selected_strategies = [1, 2, 3]
+
+    if st.session_state.auto_strategy and not st.session_state.no_filter:
+        st.session_state.selected_strategies = stock_radar.resolve_strategy_ids(
+            level,
+            st.session_state.selected_strategies,
+            auto_enabled=True
+        )
+
+    auto_strategy = st.checkbox("🧭 根据情绪自动切换策略", key="auto_strategy")
+    no_filter = st.checkbox("🔍 全市场热点扫描 (无过滤)", key="no_filter")
+
     # 策略选择
-    st_mode = st.radio(
-        "选择战法模式:",
-        (1, 2, 3, 0),
+    selected_strategies = st.multiselect(
+        "选择战法模式(可多选):",
+        options=[1, 2, 3],
         format_func=lambda x: {
             1: "🚀 早盘强势追涨 (9:30-10:30)",
             2: "🐟 尾盘潜伏低吸 (14:30-15:00)",
-            3: "⚡ 冲击涨停博弈 (激进)",
-            0: "🔍 全市场热点扫描 (无过滤)"
-        }[x]
+            3: "⚡ 冲击涨停博弈 (激进)"
+        }[x],
+        key="selected_strategies"
     )
 
     st.markdown("---")
@@ -256,48 +515,19 @@ with st.sidebar:
 st.title("🚀 A股短线狙击雷达")
 st.markdown("### 📊 市场情绪监控 (Market Sentiment)")
 
-# 初始化
-if 'radar' not in st.session_state:
-    st.session_state.radar = StreamlitRadar()
+col1, col2, col3 = st.columns(3)
 
-# 获取情绪
-with st.spinner('正在侦测大盘情绪...'):
-    # 这里我们直接调用 sentiment.py，为了拿具体数值，建议你去修改 sentiment.py 返回字典
-    # 这里为了演示，我们假设 check_mood 还是打印，我们只能重新简单算一下
-    # 为了GUI好看，这里我们在GUI里简单复写一下获取数值的逻辑
-
-    mood_data = MarketSentiment.check_mood(st.session_state.radar.today)
-    # 注意：如果你还没修改 sentiment.py 返回字典，这里可能会报错。
-    # 建议确保 sentiment.py 返回的是字典 {'level':.., 'sh_pct':.., 'premium':..}
-    # 如果没改，这里用 try-except 兜底
-
-    try:
-        if isinstance(mood_data, int):  # 旧版只返回 int
-            sh_pct = 0.0;
-            premium = 0.0;
-            level = mood_data
-        else:
-            sh_pct = mood_data.get('sh_pct', 0)
-            premium = mood_data.get('premium', 0)
-            level = mood_data.get('level', 0)
-    except:
-        sh_pct = 0;
-        premium = 0;
-        level = 0
-
-    col1, col2, col3 = st.columns(3)
-
-    with col1:
-        st.metric("上证指数涨幅", f"{sh_pct:.2f}%", delta_color="normal")
-    with col2:
-        st.metric("昨日涨停溢价", f"{premium:.2f}%", delta_color="normal")
-    with col3:
-        if level == 1:
-            st.success("🟢 情绪高涨：大胆操作")
-        elif level == -1:
-            st.error("🔴 情绪冰点：建议空仓")
-        else:
-            st.warning("🟡 情绪震荡：控制仓位")
+with col1:
+    st.metric("上证指数涨幅", f"{sh_pct:.2f}%", delta_color="normal")
+with col2:
+    st.metric("昨日涨停溢价", f"{premium:.2f}%", delta_color="normal")
+with col3:
+    if level == 1:
+        st.success("🟢 情绪高涨：大胆操作")
+    elif level == -1:
+        st.error("🔴 情绪冰点：建议空仓")
+    else:
+        st.warning("🟡 情绪震荡：控制仓位")
 
 st.markdown("---")
 
@@ -308,7 +538,15 @@ if level == -1:
     st.error("⛔ 触发熔断保护，停止扫描个股。请管住手！")
 else:
     with st.spinner('正在扫描全市场数据...'):
-        data_map = st.session_state.radar.get_raw_data(st_mode, selected_boards)
+        if no_filter:
+            strategy_ids = []
+        else:
+            strategy_ids = stock_radar.resolve_strategy_ids(
+                level,
+                selected_strategies,
+                auto_enabled=auto_strategy
+            )
+        data_map = st.session_state.radar.get_raw_data(strategy_ids, selected_boards)
 
         if not data_map:
             st.warning("暂未获取到有效热点数据，可能是休市或接口波动。")
@@ -343,6 +581,20 @@ else:
                                 )
                             }
                         )
+
+# 4. 次日确认 (T+1 Check)
+st.markdown("---")
+st.markdown("### ✅ 次日确认 (T+1)")
+
+with st.spinner('正在生成次日确认...'):
+    fallback_ids = selected_strategies if selected_strategies else [1, 2, 3]
+    t1_df, t1_msg = build_t1_confirmation("stock_data.db", fallback_ids)
+    if t1_msg:
+        st.info(t1_msg)
+    elif t1_df.empty:
+        st.info("暂无可确认的股票。")
+    else:
+        st.dataframe(t1_df, use_container_width=True, hide_index=True)
 
 # 页脚
 st.markdown("---")

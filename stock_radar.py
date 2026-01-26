@@ -23,8 +23,25 @@ pd.set_option('display.unicode.east_asian_width', True)
 # 2 = 尾盘潜伏 (14:30-15:00)
 # 3 = 冲击涨停 (激进)
 # 0 = 不筛选 (显示板块内所有大涨股)
+# 也可使用列表，如 [1, 2, 3] 同时启用多种风格
 # ==========================================
 CURRENT_STRATEGY = 2
+AUTO_STRATEGY = True
+AUTO_STRATEGY_MAP = {
+    1: [1, 3],
+    0: [2],
+    -1: []
+}
+
+
+def resolve_strategy_ids(mood_level, manual_strategy, auto_enabled=None, auto_map=None):
+    if auto_enabled is None:
+        auto_enabled = AUTO_STRATEGY
+    if auto_map is None:
+        auto_map = AUTO_STRATEGY_MAP
+    if auto_enabled:
+        return StrategyFilter.normalize_strategy_ids(auto_map.get(mood_level, []))
+    return StrategyFilter.normalize_strategy_ids(manual_strategy)
 
 
 # ==========================================
@@ -41,7 +58,10 @@ class StockRadarPro:
 
     def get_strategy_name(self):
         names = {1: "早盘强势追涨", 2: "尾盘潜伏低吸", 3: "冲击涨停博弈", 0: "全市场扫描"}
-        return names.get(CURRENT_STRATEGY, "未知")
+        strategy_ids = StrategyFilter.normalize_strategy_ids(CURRENT_STRATEGY)
+        if not strategy_ids:
+            return names.get(0, "全市场扫描")
+        return " / ".join([names[sid] for sid in strategy_ids])
 
     def _refresh_limit_pool(self):
         try:
@@ -173,13 +193,9 @@ class StockRadarPro:
                 is_selected = True
                 strategy_tag = ""
 
-                if CURRENT_STRATEGY != 0:
-                    if CURRENT_STRATEGY == 1:
-                        is_selected, strategy_tag = StrategyFilter.check_strong_chase(row, threshold)
-                    elif CURRENT_STRATEGY == 2:
-                        is_selected, strategy_tag = StrategyFilter.check_tail_end_lurk(row, threshold)
-                    elif CURRENT_STRATEGY == 3:
-                        is_selected, strategy_tag = StrategyFilter.check_weak_to_strong(row, threshold)
+                strategy_ids = StrategyFilter.normalize_strategy_ids(CURRENT_STRATEGY)
+                if strategy_ids:
+                    is_selected, strategy_tag = StrategyFilter.apply_strategies(row, threshold, strategy_ids)
 
                 # 只有符合策略的才放入候选池
                 if is_selected:
@@ -258,6 +274,7 @@ class StockRadarPro:
             return []
 
     def run(self):
+        global CURRENT_STRATEGY
 
         print("\n" + "=" * 50)
         print(f"🚀 A股短线雷达 | 策略: {self.get_strategy_name()} | {datetime.datetime.now().strftime('%H:%M:%S')}")
@@ -268,6 +285,11 @@ class StockRadarPro:
         # 传入 self.today 以获取正确的“昨日涨停”数据
         mood_data = MarketSentiment.check_mood(self.today)
         mood_level = mood_data['level']  # 获取红绿灯状态
+
+        strategy_ids = resolve_strategy_ids(mood_level, CURRENT_STRATEGY)
+        if AUTO_STRATEGY:
+            CURRENT_STRATEGY = strategy_ids
+            print(f"{Fore.CYAN}[策略] 情绪:{mood_level} -> {self.get_strategy_name()}{Style.RESET_ALL}")
 
         # 💾 保存情绪数据到数据库
         self.db.save_mood(
