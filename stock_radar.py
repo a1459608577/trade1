@@ -96,7 +96,7 @@ class StockRadarPro:
         # ============================================
         try:
             print(f"1️⃣ 尝试 [新浪行业] 接口...")
-            df = ak.stock_sector_spot(indicator="新浪行业")
+            df = ak.stock_sector_spot(indicator="行业")
 
             if not df.empty:
                 # print(f"调试列名: {df.columns.tolist()}") # 调试用
@@ -125,7 +125,7 @@ class StockRadarPro:
         # ============================================
         try:
             print(f"2️⃣ 尝试 [新浪概念] 接口...")
-            df = ak.stock_sector_spot(indicator="新浪概念")
+            df = ak.stock_sector_spot(indicator="概念")
 
             if not df.empty:
                 # ✅ 修正点：同样只映射 'name'
@@ -159,150 +159,193 @@ class StockRadarPro:
         print(f"{Fore.RED}⛔ 所有数据源均不可用，请检查网络连接！{Style.RESET_ALL}")
         return pd.DataFrame()
 
-    def deep_dive_concept(self, concept_name):
+    # 🟢 【新增】核心辅助方法：从新浪获取板块成分股
+    def _fetch_sina_concept_stocks(self, concept_name):
         """
-        深入概念挖掘 (修复版：弃用 THS，全线转用 EM)
+        根据中文板块名，从新浪获取成分股数据
+        逻辑：先查[新浪行业] -> 再查[新浪概念] -> 获取Label -> 获取成分股
         """
-        # 🟢 随机延迟，防止被封 IP
-        time.sleep(random.uniform(0.5, 1.0))
+        target_label = None
 
+        # 1. 尝试在【新浪行业】中查找 Label
         try:
-            df = pd.DataFrame()
+            df_ind = ak.stock_sector_spot(indicator="行业")
+            if not df_ind.empty:
+                # 模糊匹配或精确匹配
+                match = df_ind[df_ind['name'] == concept_name]
+                if not match.empty:
+                    target_label = match.iloc[0]['label']
+        except:
+            pass
 
-            # ============================================
-            # 方案 A: 东方财富概念成分股 (首选)
-            # ============================================
+        # 2. 如果没找到，尝试在【新浪概念】中查找
+        if not target_label:
             try:
-                # print(f"  > 尝试 EM 概念成分股: {concept_name}...")
-                df = ak.stock_board_concept_cons_em(symbol=concept_name)
-            except Exception as e:
-                # print(f"    EM概念失败: {e}")
+                df_con = ak.stock_sector_spot(indicator="概念")
+                if not df_con.empty:
+                    match = df_con[df_con['name'] == concept_name]
+                    if not match.empty:
+                        target_label = match.iloc[0]['label']
+            except:
                 pass
 
-            # ============================================
-            # 方案 B: 东方财富行业成分股 (备选)
-            # ============================================
-            if df.empty:
-                try:
-                    # print(f"  > 尝试 EM 行业成分股: {concept_name}...")
-                    df = ak.stock_board_industry_cons_em(symbol=concept_name)
-                except Exception as e:
-                    pass
+        if not target_label:
+            # print(f"⚠️ 未在新浪数据源中找到板块：{concept_name}")
+            return pd.DataFrame()
 
-            # ============================================
-            # 方案 C: 同花顺 (已废弃，直接移除)
-            # ============================================
-            # 旧接口 ak.stock_board_concept_cons_ths 已失效，不再尝试
+        # 3. 获取成分股详情
+        try:
+            # print(f"🔍 正在从新浪获取【{concept_name}】({target_label}) 成分股...")
+            df = ak.stock_sector_detail(sector=target_label)
+            if df.empty: return pd.DataFrame()
 
-            if df.empty:
-                # print(f"{Fore.YELLOW}  ⚠️ 无法获取板块【{concept_name}】的成分股{Style.RESET_ALL}")
-                return []
+            # 4. 数据清洗 (新浪返回的字段需要映射)
+            # 新浪列名通常为: symbol, code, name, trade, pricechange, changepercent, buy, sell, settlement, open, high, low, volume, amount, ticktime, per, pb, mktcap, nmc, turnoverratio
+            df = df.rename(columns={
+                'name': '名称',
+                'trade': '现价',
+                'changepercent': '涨跌幅',
+                'turnoverratio': '换手',
+                'high': '最高',
+                'low': '最低',
+                'volume': '成交量',
+                'amount': '成交额'
+            })
 
-            # --- 数据清洗与标准化的逻辑 (保持不变) ---
+            # 处理代码：新浪返回的 symbol 是 sh600519，我们需要 600519
+            # 优先用 symbol 列处理，因为 code 列有时候格式不统一
+            if 'symbol' in df.columns:
+                df['代码'] = df['symbol'].astype(str).str.replace(r'^(sh|sz|bj)', '', regex=True)
+            elif 'code' in df.columns:
+                df['代码'] = df['code'].astype(str)
 
-            # 1. 统一列名 (EM 返回的列名可能是 '最新涨跌幅')
-            rename_map = {
-                '最新涨跌幅': '涨跌幅',
-                '最新价': '现价',
-                '代码': '代码',
-                '名称': '名称',
-                '换手率': '换手',
-                '量比': '量比'
-            }
-            # 仅重命名存在的列
-            df = df.rename(columns=rename_map)
+            # 补充缺失字段：新浪接口不返回“量比”，暂设为 0 (策略中需注意兼容)
+            if '量比' not in df.columns:
+                df['量比'] = 0.0
 
-            # 2. 确保关键字段是数字
-            cols_to_numeric = ['涨跌幅', '现价', '最高', '最低', '换手', '量比']
-            for col in cols_to_numeric:
-                if col in df.columns:
-                    df[col] = pd.to_numeric(df[col], errors='coerce')
-
-            # 3. 排序取前10
-            if '涨跌幅' in df.columns:
-                df_sorted = df.sort_values(by="涨跌幅", ascending=False).head(10)
-            else:
-                return []
-
-            candidates = []
-
-            for _, row in df_sorted.iterrows():
-                try:
-                    code = str(row['代码'])
-                    name = row['名称']
-                    pct = row.get('涨跌幅', 0)
-                    price = row.get('现价', 0)
-                    high = row.get('最高', price)
-                    low = row.get('最低', price)
-                    turnover = row.get('换手', 0)
-
-                    if "ST" in name: continue
-                    threshold = self._get_limit_threshold(code, name)
-
-                    if self._is_one_word_board(high, low, pct, threshold):
-                        continue
-
-                    is_selected = True
-                    strategy_tag = ""
-
-                    strategy_ids = StrategyFilter.normalize_strategy_ids(CURRENT_STRATEGY)
-                    if strategy_ids:
-                        is_selected, strategy_tag = StrategyFilter.apply_strategies(row, threshold, strategy_ids)
-
-                    if is_selected:
-                        streak_info = ""
-                        if code in self.zt_data:
-                            streak = self.zt_data[code]
-                            streak_info = f"🔥{streak}板"
-                        elif code in self.zbgc_data:
-                            streak_info = "💣炸板"
-
-                        # 存入数据库
-                        if hasattr(self, 'db'):
-                            clean_strategy = strategy_tag.replace("🚀", "").replace("🐟", "").replace("⚡", "").strip()
-                            self.db.save_candidate(self.today, code, name, clean_strategy, concept_name, price, pct)
-
-                        candidates.append({
-                            "code": code,
-                            "name": name,
-                            "pct": pct,
-                            "price": price,
-                            "turnover": turnover,
-                            "strategy_tag": strategy_tag,
-                            "streak_info": streak_info
-                        })
-                except Exception:
-                    continue
-
-            # 输出展示
-            final_results = []
-            count = len(candidates)
-            if count == 0: return []
-
-            sector_tag = ""
-            if count >= 3:
-                sector_tag = f"{Fore.RED}[🔥板块爆发]"
-            elif count == 2:
-                sector_tag = f"{Fore.MAGENTA}[🤝双龙并进]"
-            else:
-                sector_tag = f"{Fore.BLUE}[⚠️独苗]"
-
-            for cand in candidates:
-                color = Fore.YELLOW
-                if count >= 3: color = Fore.MAGENTA
-
-                display_str = (
-                    f"  {cand['strategy_tag']} {color}[{cand['code']}] {cand['name']} "
-                    f"涨幅:{cand['pct']:>5.2f}% {cand['streak_info']} "
-                    f"现价:{cand['price']} 换{cand['turnover']:.1f}% {sector_tag}{Style.RESET_ALL}"
-                )
-                final_results.append(display_str)
-
-            return final_results
+            return df
 
         except Exception as e:
-            print(f"❌ 板块挖掘报错: {e}")
+            print(f"❌ 新浪成分股接口报错: {e}")
+            return pd.DataFrame()
+
+    def deep_dive_concept(self, concept_name):
+        """
+        深入概念挖掘 (修复版：全线转用新浪源)
+        """
+        # 🟢 随机延迟
+        time.sleep(random.uniform(0.5, 1.0))
+
+        df = pd.DataFrame()
+
+        # ============================================
+        # 方案 A: 新浪源 (Sina) - 首选
+        # ============================================
+        df = self._fetch_sina_concept_stocks(concept_name)
+
+        # ============================================
+        # 方案 B: 东方财富行业 (备选，以防新浪找不到)
+        # ============================================
+        if df.empty:
+            try:
+                # print(f"  > 新浪无数据，尝试 EM 行业成分股: {concept_name}...")
+                df = ak.stock_board_industry_cons_em(symbol=concept_name)
+            except Exception:
+                pass
+
+        if df.empty:
             return []
+
+        # --- 数据标准化清洗 ---
+        cols_to_numeric = ['涨跌幅', '现价', '最高', '最低', '换手', '量比']
+        for col in cols_to_numeric:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+
+        # 新浪接口的涨跌幅单位通常已经是百分比 (e.g. 5.21)，不需要 * 100
+        # 但为了保险，可以检查一下范围，这里暂按标准处理
+
+        # 排序取前 10
+        if '涨跌幅' in df.columns:
+            df_sorted = df.sort_values(by="涨跌幅", ascending=False).head(10)
+        else:
+            return []
+
+        candidates = []
+
+        for _, row in df_sorted.iterrows():
+            try:
+                code = str(row['代码'])
+                name = row['名称']
+                pct = row.get('涨跌幅', 0)
+                price = row.get('现价', 0)
+                high = row.get('最高', price)
+                low = row.get('最低', price)
+                turnover = row.get('换手', 0)
+
+                if "ST" in name: continue
+                threshold = self._get_limit_threshold(code, name)
+
+                if self._is_one_word_board(high, low, pct, threshold):
+                    continue
+
+                is_selected = True
+                strategy_tag = ""
+
+                strategy_ids = StrategyFilter.normalize_strategy_ids(CURRENT_STRATEGY)
+                if strategy_ids:
+                    is_selected, strategy_tag = StrategyFilter.apply_strategies(row, threshold, strategy_ids)
+
+                if is_selected:
+                    streak_info = ""
+                    if code in self.zt_data:
+                        streak = self.zt_data[code]
+                        streak_info = f"🔥{streak}板"
+                    elif code in self.zbgc_data:
+                        streak_info = "💣炸板"
+
+                    # 存入数据库
+                    if hasattr(self, 'db'):
+                        clean_strategy = strategy_tag.replace("🚀", "").replace("🐟", "").replace("⚡", "").strip()
+                        self.db.save_candidate(self.today, code, name, clean_strategy, concept_name, price, pct)
+
+                    candidates.append({
+                        "code": code,
+                        "name": name,
+                        "pct": pct,
+                        "price": price,
+                        "turnover": turnover,
+                        "strategy_tag": strategy_tag,
+                        "streak_info": streak_info
+                    })
+            except Exception:
+                continue
+
+        # 输出展示 (保持不变)
+        final_results = []
+        count = len(candidates)
+        if count == 0: return []
+
+        sector_tag = ""
+        if count >= 3:
+            sector_tag = f"{Fore.RED}[🔥板块爆发]"
+        elif count == 2:
+            sector_tag = f"{Fore.MAGENTA}[🤝双龙并进]"
+        else:
+            sector_tag = f"{Fore.BLUE}[⚠️独苗]"
+
+        for cand in candidates:
+            color = Fore.YELLOW
+            if count >= 3: color = Fore.MAGENTA
+
+            display_str = (
+                f"  {cand['strategy_tag']} {color}[{cand['code']}] {cand['name']} "
+                f"涨幅:{cand['pct']:>5.2f}% {cand['streak_info']} "
+                f"现价:{cand['price']} 换{cand['turnover']:.1f}% {sector_tag}{Style.RESET_ALL}"
+            )
+            final_results.append(display_str)
+
+        return final_results
 
     def run(self):
         global CURRENT_STRATEGY

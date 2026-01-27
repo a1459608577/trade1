@@ -266,6 +266,11 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+# 定义缓存函数，TTL=180秒 (3分钟刷新一次足够了)
+@st.cache_data(ttl=60)
+def get_cached_raw_data(strategy_ids, valid_boards, _radar_instance):
+    # 这里调用 radar 实例的方法
+    return _radar_instance.get_raw_data(strategy_ids, valid_boards)
 
 # ==========================================
 # 🧠 逻辑继承与适配 (Adapter)
@@ -292,7 +297,7 @@ class StreamlitRadar(stock_radar.StockRadarPro):
             return None
 
         for _, row in concepts.iterrows():
-            c_name = row.get('板块', '未知')
+            c_name = row.get('板块', row.get('板块名称', '未知'))
             c_pct = row['涨跌幅']
 
             # 获取成分股数据
@@ -305,24 +310,31 @@ class StreamlitRadar(stock_radar.StockRadarPro):
 
     def get_concept_stocks_data(self, concept_name, valid_boards):
         """
-        获取板块个股数据 (修改版：增加兜底机制)
-        如果策略没选出票，自动返回前5名作为观察
+        获取板块个股数据 (GUI版：使用新浪源)
         """
         try:
-            # 1. 获取数据
             df = pd.DataFrame()
-            try:
-                df = stock_radar.ak.stock_board_industry_cons_em(symbol=concept_name)
-            except Exception as e:
-                print(f"获取获取板块{concept_name}个股数据数据失败: {e}")
+
+            # 🟢 1. 直接调用父类的新浪获取方法 (复用逻辑)
+            # StreamlitRadar 继承自 StockRadarPro，所以可以直接用 self._fetch_sina_concept_stocks
+            # 只有在 gui.py 中确保 stock_radar.py 已经更新后，这里才能生效
+            if hasattr(self, '_fetch_sina_concept_stocks'):
+                df = self._fetch_sina_concept_stocks(concept_name)
+            else:
+                # 兼容性兜底：如果父类没更新，尝试手动实现或报错
+                # 建议先更新 stock_radar.py
+                pass
+
+            # 🟡 2. 如果新浪没拿到，尝试东财行业 (兜底)
+            if df.empty:
                 try:
-                    df = stock_radar.ak.stock_board_concept_cons_em(symbol=concept_name)
-                except Exception as e:
-                    print(f"获取获取板块{concept_name}概念个股数据数据失败: {e}")
+                    df = stock_radar.ak.stock_board_industry_cons_em(symbol=concept_name)
+                except:
                     pass
 
             if df.empty: return []
 
+            # --- 下面的逻辑保持不变 (数据清洗、排序、兜底展示) ---
             # 2. 数据清洗
             cols = ['涨跌幅', '现价', '最高', '最低', '换手', '量比']
             for col in cols:
@@ -332,8 +344,8 @@ class StreamlitRadar(stock_radar.StockRadarPro):
             # 排序：取前10名
             df_sorted = df.sort_values(by="涨跌幅", ascending=False).head(10)
 
-            clean_data = []  # 存放【符合策略】的票
-            fallback_data = []  # 存放【前排兜底】的票 (用于没票时展示)
+            clean_data = []
+            fallback_data = []
 
             leader_index = df_sorted.index[0] if not df_sorted.empty else None
 
@@ -392,7 +404,7 @@ class StreamlitRadar(stock_radar.StockRadarPro):
                     "涨幅": f"{pct:.2f}%",
                     "现价": price,
                     "状态": status,
-                    "策略": clean_tag,
+                    "策略": tag.replace("🚀", "").replace("🐟", "").replace("⚡", "").strip(),
                     "换手%": f"{turnover:.1f}"
                 }
 
@@ -538,7 +550,7 @@ else:
                 selected_strategies,
                 auto_enabled=auto_strategy
             )
-        data_map = st.session_state.radar.get_raw_data(strategy_ids, selected_boards)
+        data_map = get_cached_raw_data(strategy_ids, selected_boards, st.session_state.radar)
 
         if not data_map:
             st.warning("暂未获取到有效热点数据，可能是休市或接口波动。")
@@ -574,7 +586,7 @@ else:
 
                         st.dataframe(
                             df.style.map(highlight_status, subset=['状态']),
-                            use_container_width=True,
+                            width="stretch",  # <--- ✅ 新参数：拉伸填满
                             hide_index=True,
                             column_config={
                                 "代码": st.column_config.LinkColumn(
@@ -588,7 +600,7 @@ else:
 
 # 4. 次日确认 (T+1 Check)
 st.markdown("---")
-st.markdown("### ✅ 次日确认 (T+1)")
+st.markdown("### ✅ 选股验证 (最新记录)")
 
 with st.spinner('正在生成次日确认...'):
     fallback_ids = selected_strategies if selected_strategies else [1, 2, 3]
@@ -598,7 +610,7 @@ with st.spinner('正在生成次日确认...'):
     elif t1_df.empty:
         st.info("暂无可确认的股票。")
     else:
-        st.dataframe(t1_df, use_container_width=True, hide_index=True)
+        st.dataframe(t1_df, width="stretch", hide_index=True)
 
 # 页脚
 st.markdown("---")
