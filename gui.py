@@ -310,27 +310,18 @@ class StreamlitRadar(stock_radar.StockRadarPro):
 
     def get_concept_stocks_data(self, concept_name, valid_boards):
         """
-        获取板块个股数据 (GUI版：使用新浪源)
+        获取板块个股数据 (GUI版)
         """
         try:
             df = pd.DataFrame()
 
-            # 🟢 1. 直接调用父类的新浪获取方法 (复用逻辑)
-            # StreamlitRadar 继承自 StockRadarPro，所以可以直接用 self._fetch_sina_concept_stocks
-            # 只有在 gui.py 中确保 stock_radar.py 已经更新后，这里才能生效
-            if hasattr(self, '_fetch_sina_concept_stocks'):
-                df = self._fetch_sina_concept_stocks(concept_name)
-            else:
-                # 兼容性兜底：如果父类没更新，尝试手动实现或报错
-                # 建议先更新 stock_radar.py
-                pass
+            # 🟢 1. 优先调用父类的东财获取方法
+            if hasattr(self, '_fetch_em_stocks'):
+                df = self._fetch_em_stocks(concept_name)
 
-            # 🟡 2. 如果新浪没拿到，尝试东财行业 (兜底)
-            if df.empty:
-                try:
-                    df = stock_radar.ak.stock_board_industry_cons_em(symbol=concept_name)
-                except:
-                    pass
+            # 🟡 2. 兜底逻辑
+            if df.empty and hasattr(self, '_fetch_sina_concept_stocks'):
+                 df = self._fetch_sina_concept_stocks(concept_name)
 
             if df.empty: return []
 
@@ -466,6 +457,7 @@ with st.spinner('正在侦测大盘情绪...'):
         level = 0
 
 # 1. 侧边栏：控制台
+# 1. 侧边栏：控制台
 with st.sidebar:
     st.header("🎮 操盘控制台")
 
@@ -476,6 +468,8 @@ with st.sidebar:
     if "selected_strategies" not in st.session_state:
         st.session_state.selected_strategies = [1, 2, 3]
 
+    # --- 逻辑调整：先处理 Auto 策略的计算，这样表单提交后能正确计算出策略 ---
+    # 注意：在 st.form 模式下，只有点击提交按钮触发 rerun 后，这里的 session_state 才会更新
     if st.session_state.auto_strategy and not st.session_state.no_filter:
         st.session_state.selected_strategies = stock_radar.resolve_strategy_ids(
             level,
@@ -483,37 +477,43 @@ with st.sidebar:
             auto_enabled=True
         )
 
-    auto_strategy = st.checkbox("🧭 根据情绪自动切换策略", key="auto_strategy")
-    no_filter = st.checkbox("🔍 全市场热点扫描 (无过滤)", key="no_filter")
+    # === ✨ 修改开始：使用 st.form 包裹控件 ===
+    with st.form(key='control_panel_form'):
+        auto_strategy = st.checkbox("🧭 根据情绪自动切换策略", key="auto_strategy")
+        no_filter = st.checkbox("🔍 全市场热点扫描 (无过滤)", key="no_filter")
 
-    # 策略选择
-    selected_strategies = st.multiselect(
-        "选择战法模式(可多选):",
-        options=[1, 2, 3],
-        format_func=lambda x: {
-            1: "🚀 早盘强势追涨 (9:30-10:30)",
-            2: "🐟 尾盘潜伏低吸 (14:30-15:00)",
-            3: "⚡ 冲击涨停博弈 (激进)"
-        }[x],
-        key="selected_strategies"
-    )
+        # 策略选择
+        selected_strategies = st.multiselect(
+            "选择战法模式(可多选):",
+            options=[1, 2, 3],
+            format_func=lambda x: {
+                1: "🚀 早盘强势追涨 (9:30-10:30)",
+                2: "🐟 尾盘潜伏低吸 (14:30-15:00)",
+                3: "⚡ 冲击涨停博弈 (激进)"
+            }[x],
+            key="selected_strategies"
+        )
 
-    st.markdown("---")
-    st.markdown("🛠️ **交易权限设置**")
+        st.markdown("---")
+        st.markdown("🛠️ **交易权限设置**")
 
-    # 多选框：默认全选
-    selected_boards = st.multiselect(
-        "只看我有权限买的板块:",
-        options=["主板 (60/00)", "创业板 (300)", "科创板 (688)", "北交所 (8/4)"],
-        default=["主板 (60/00)", "创业板 (300)", "科创板 (688)"],  # 默认不选北交所，因为太冷门
-        help="取消勾选你无法交易的板块，选股器会自动过滤。"
-    )
+        # 多选框：默认全选
+        selected_boards = st.multiselect(
+            "只看我有权限买的板块:",
+            options=["主板 (60/00)", "创业板 (300)", "科创板 (688)", "北交所 (8/4)"],
+            default=["主板 (60/00)", "创业板 (300)", "科创板 (688)"],  # 默认不选北交所
+            help="取消勾选你无法交易的板块，选股器会自动过滤。"
+        )
 
-    # 手动刷新按钮
-    if st.button("🔄 立即刷新数据", use_container_width=True):
-        st.rerun()
+        st.markdown("<br>", unsafe_allow_html=True)  # 增加一点间距
 
-    st.info("💡 提示：该界面每 60 秒会自动尝试刷新 (需手动开启循环或部署)")
+        # 将原来的 st.button 改为 st.form_submit_button
+        # 点击此按钮后，上述所有控件的状态才会提交给后台，并触发一次 Rerun
+        refresh_btn = st.form_submit_button("🚀 执行扫描 / 刷新数据", use_container_width=True)
+    # === ✨ 修改结束 ===
+
+    st.info("💡 提示：调整上方选项后，请点击【执行扫描】按钮生效。")
+
 
 # 2. 顶部：大盘情绪红绿灯
 st.title("🚀 A股短线狙击雷达")

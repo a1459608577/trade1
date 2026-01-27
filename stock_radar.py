@@ -89,8 +89,51 @@ class StockRadarPro:
 
     def scan_hot_concepts(self, top_n=3):
         """
-        获取热点板块 (修正版：修复新浪源名称为英文代码的问题)
+        获取热点板块 (改为：优先使用东方财富)
         """
+        # ============================================
+        # 方案 A: 东方财富行业 (EastMoney Industry) - 首选
+        # ============================================
+        try:
+            print(f"1️⃣ 尝试 [东方财富-行业] 接口...")
+            # 获取行业板块列表
+            df = ak.stock_board_industry_name_em()
+
+            if not df.empty:
+                # 东财列名通常是：排名, 板块名称, 板块代码, 最新价, 涨跌幅, ...
+                # 我们统一映射为标准字段
+                rename_dict = {
+                    '板块名称': '板块',
+                    '涨跌幅': '涨跌幅'
+                }
+                df = df.rename(columns=rename_dict)
+
+                if '板块' in df.columns and '涨跌幅' in df.columns:
+                    df['涨跌幅'] = pd.to_numeric(df['涨跌幅'], errors='coerce')
+                    print(f"✅ 东财行业获取成功: {len(df)} 条")
+                    return df.sort_values(by="涨跌幅", ascending=False).head(top_n)
+
+        except Exception as e:
+            print(f"❌ [EM行业] 失败: {e}")
+
+        # ============================================
+        # 方案 B: 东方财富概念 (EastMoney Concept) - 备选
+        # ============================================
+        try:
+            print(f"2️⃣ 尝试 [东方财富-概念] 接口...")
+            df = ak.stock_board_concept_name_em()
+            if not df.empty:
+                rename_dict = {
+                    '板块名称': '板块',
+                    '涨跌幅': '涨跌幅'
+                }
+                df = df.rename(columns=rename_dict)
+                df['涨跌幅'] = pd.to_numeric(df['涨跌幅'], errors='coerce')
+                return df.sort_values(by="涨跌幅", ascending=False).head(top_n)
+        except Exception as e:
+            print(f"❌ [EM概念] 失败: {e}")
+
+
         # ============================================
         # 方案 A: 新浪行业板块 (Sina Industry) - 首选
         # ============================================
@@ -143,21 +186,56 @@ class StockRadarPro:
         except Exception as e:
             print(f"❌ [Sina概念] 失败: {e}")
 
-        # ============================================
-        # 方案 C: 东方财富行业 (保底)
-        # ============================================
-        try:
-            print(f"3️⃣ 尝试 [东方财富行业] 接口...")
-            df = ak.stock_board_industry_name_em()
-            if not df.empty and '涨跌幅' in df.columns:
-                df['涨跌幅'] = pd.to_numeric(df['涨跌幅'], errors='coerce')
-                print(f"✅ EM行业获取成功: {len(df)} 条")
-                return df.sort_values(by="涨跌幅", ascending=False).head(top_n)
-        except Exception as e:
-            pass
-
         print(f"{Fore.RED}⛔ 所有数据源均不可用，请检查网络连接！{Style.RESET_ALL}")
         return pd.DataFrame()
+
+    def _fetch_em_stocks(self, plate_name):
+        """
+        从东方财富获取板块成分股
+        """
+        df = pd.DataFrame()
+        try:
+            # 1. 尝试按行业获取
+            df = ak.stock_board_industry_cons_em(symbol=plate_name)
+        except:
+            pass
+
+        if df.empty:
+            try:
+                # 2. 尝试按概念获取
+                df = ak.stock_board_concept_cons_em(symbol=plate_name)
+            except:
+                pass
+
+        if df.empty:
+            return pd.DataFrame()
+
+        # === 核心：字段映射 (东财 -> 系统标准) ===
+        # 东财返回的常见列名: 代码, 名称, 最新价, 涨跌幅, 成交量, 成交额, 换手率, 量比, 最高, 最低
+        rename_map = {
+            '最新价': '现价',
+            '涨跌幅': '涨跌幅',
+            '换手率': '换手',
+            '最高': '最高',
+            '最低': '最低',
+            '量比': '量比',
+            '成交量': '成交量'
+        }
+        df = df.rename(columns=rename_map)
+
+        # 格式化代码 (东财通常返回纯数字代码，如 '000001')
+        df['代码'] = df['代码'].astype(str)
+
+        # 确保关键列存在且为数值
+        cols = ['现价', '涨跌幅', '换手', '量比', '最高', '最低']
+        for col in cols:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+            else:
+                df[col] = 0.0  # 缺失填充
+
+        return df
+
 
     # 🟢 【新增】核心辅助方法：从新浪获取板块成分股
     def _fetch_sina_concept_stocks(self, concept_name):
@@ -233,25 +311,21 @@ class StockRadarPro:
         """
         深入概念挖掘 (修复版：全线转用新浪源)
         """
-        # 🟢 随机延迟
-        time.sleep(random.uniform(0.5, 1.0))
+        # 随机延迟增加一点，防止东财封锁
+        time.sleep(random.uniform(1.0, 2.0))
 
         df = pd.DataFrame()
 
         # ============================================
-        # 方案 A: 新浪源 (Sina) - 首选
+        # 方案 A: 东方财富 (首选)
         # ============================================
-        df = self._fetch_sina_concept_stocks(concept_name)
+        df = self._fetch_em_stocks(concept_name)
 
         # ============================================
-        # 方案 B: 东方财富行业 (备选，以防新浪找不到)
+        # 方案 B: 新浪 (备选)
         # ============================================
         if df.empty:
-            try:
-                # print(f"  > 新浪无数据，尝试 EM 行业成分股: {concept_name}...")
-                df = ak.stock_board_industry_cons_em(symbol=concept_name)
-            except Exception:
-                pass
+            df = self._fetch_sina_concept_stocks(concept_name)
 
         if df.empty:
             return []
@@ -378,7 +452,7 @@ class StockRadarPro:
             return
 
         for i, row in concepts.iterrows():
-            c_name = row.get('概念名称', row.get('板块'))
+            c_name = row.get('板块名称', row.get('板块'))
             c_pct = row['涨跌幅']
 
             print(f"\n📂 TOP {i + 1}: 【{c_name}】 (涨幅: {c_pct}%)")
