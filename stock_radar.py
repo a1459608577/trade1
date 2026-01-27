@@ -172,7 +172,7 @@ class StockRadarPro:
             df_ind = ak.stock_sector_spot(indicator="行业")
             if not df_ind.empty:
                 # 模糊匹配或精确匹配
-                match = df_ind[df_ind['name'] == concept_name]
+                match = df_ind[df_ind['板块'] == concept_name]
                 if not match.empty:
                     target_label = match.iloc[0]['label']
         except:
@@ -183,7 +183,7 @@ class StockRadarPro:
             try:
                 df_con = ak.stock_sector_spot(indicator="概念")
                 if not df_con.empty:
-                    match = df_con[df_con['name'] == concept_name]
+                    match = df_con[df_con['板块'] == concept_name]
                     if not match.empty:
                         target_label = match.iloc[0]['label']
             except:

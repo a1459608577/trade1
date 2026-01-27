@@ -4,5 +4,5 @@
 *.ipr
 
 
-./stock_data.db
+*.db
 
