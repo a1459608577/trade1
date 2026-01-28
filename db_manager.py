@@ -88,6 +88,18 @@ class DBManager:
         finally:
             conn.close()
 
+    def delete_candidate(self, code):
+        """根据代码删除自选股记录"""
+        conn = self.get_conn()
+        c = conn.cursor()
+        try:
+            c.execute('DELETE FROM stock_candidates WHERE code = ?', (code,))
+            conn.commit()
+            print(f"🗑️ [DB] 已删除个股: {code}")
+        except Exception as e:
+            print(f"❌ [DB] 删除失败: {e}")
+        finally:
+            conn.close()
     def export_to_excel(self):
         """(可选) 将数据库导出为 Excel 方便查看"""
         import pandas as pd

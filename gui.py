@@ -248,6 +248,145 @@ def build_t1_confirmation(db_path, fallback_strategy_ids):
     return pd.DataFrame(results), ""
 
 
+# 🟢 新增辅助函数：渲染带“加入”按钮的股票行
+def render_stock_row(index, row, db_manager, context):
+    """
+    渲染单行股票数据，带加入按钮
+    """
+    # 定义列宽比例：代码, 名称, 现价, 涨幅, 状态, 策略, 按钮
+    cols = st.columns([1.2, 1.2, 1, 1, 1.5, 2, 1])
+
+    code = str(row['代码']).replace(".html", "").split("/")[-1]  # 提取纯数字代码
+    name = row['名称']
+    price = row['现价']
+    pct_str = str(row['涨幅'])
+    status = row['状态']
+    strategy = row['策略']
+
+    # 解析涨幅数值用于颜色判断
+    try:
+        pct_val = float(pct_str.replace("%", ""))
+    except:
+        pct_val = 0.0
+
+    color = "red" if pct_val > 0 else "green"
+
+    with cols[0]:
+        # 使用 Markdown以此支持点击跳转
+        st.markdown(f"[{code}]({get_kline_url(code)})", unsafe_allow_html=True)
+    with cols[1]:
+        st.write(name)
+    with cols[2]:
+        st.write(price)
+    with cols[3]:
+        st.markdown(f":{color}[{pct_str}]")
+    with cols[4]:
+        st.caption(status)
+    with cols[5]:
+        st.caption(strategy)
+    with cols[6]:
+        # 🔘 加入按钮
+        # key 必须唯一：增加 context (板块名) 防止同一只票在不同板块出现时 key 冲突
+        unique_key = f"add_{context}_{code}_{index}"
+        if st.button("➕加入", key=unique_key, help="加入下方验证Tab"):
+            # ... (保存逻辑保持不变) ...
+            db_manager.save_candidate(
+                date=datetime.datetime.now().strftime("%Y%m%d"),
+                code=code,
+                name=name,
+                strategy=strategy,
+                concept="手动加入",
+                price=price,
+                pct=pct_val
+            )
+            st.toast(f"✅ 已将 {name} ({code}) 加入验证列表！")
+
+
+# 🟢 新增辅助函数：渲染下方的验证 Tab
+@st.fragment  # <--- 🟢 核心修改：标记为独立片段
+def render_validation_tab(db_manager):
+    """
+    渲染验证列表：从数据库读取 -> 获取实时行情 -> 展示 -> 支持删除
+    使用 @st.fragment 实现局部刷新，点击删除按钮时不会刷新整个页面
+    """
+    st.markdown("### ✅ 选股验证 (Watchlist)")
+
+    # 1. 从数据库读取已关注的股票
+    conn = db_manager.get_conn()
+    try:
+        # 获取所有验证列表中的股票 (按时间倒序)
+        candidates = pd.read_sql_query(
+            "SELECT * FROM stock_candidates ORDER BY timestamp DESC", conn
+        )
+    except Exception as e:
+        st.error(f"读取数据库失败: {e}")
+        conn.close()  # 确保关闭
+        return
+    finally:
+        conn.close()
+
+    if candidates.empty:
+        st.info("暂无验证股票，请在上方点击“加入”按钮添加。")
+        return
+
+    # 2. 获取实时行情 (批量获取以提高速度)
+    code_list = candidates['code'].astype(str).unique().tolist()
+    spot_df = _fetch_spot_for_codes(code_list)
+
+    # 转为字典方便查询
+    spot_map = {}
+    if not spot_df.empty:
+        spot_df['代码'] = spot_df['代码'].astype(str)
+        spot_map = spot_df.set_index('代码').to_dict('index')
+
+    # 3. 表头
+    title_cols = st.columns([1, 1, 1.5, 1.5, 2, 1])
+    title_cols[0].markdown("**代码**")
+    title_cols[1].markdown("**名称**")
+    title_cols[2].markdown("**昨日/入选涨幅**")
+    title_cols[3].markdown("**今日实时涨幅**")
+    title_cols[4].markdown("**加入时间**")
+    title_cols[5].markdown("**操作**")
+    st.markdown("---")
+
+    # 4. 遍历渲染
+    for index, row in candidates.iterrows():
+        code = str(row['code'])
+        name = row['name']
+        saved_pct = row['pct']
+        timestamp = row['timestamp']
+        date_added = row['date']
+
+        # 获取今日实时数据
+        current_pct = 0.0
+
+        if code in spot_map:
+            real_data = spot_map[code]
+            current_pct = real_data.get('涨跌幅', 0.0)
+
+        # 渲染行
+        r_cols = st.columns([1, 1, 1.5, 1.5, 2, 1])
+
+        with r_cols[0]:
+            st.markdown(f"[{code}]({get_kline_url(code)})")
+        with r_cols[1]:
+            st.write(name)
+        with r_cols[2]:
+            st.write(f"{saved_pct:.2f}%")
+        with r_cols[3]:
+            # 动态颜色
+            color = "red" if current_pct > 0 else ("green" if current_pct < 0 else "gray")
+            st.markdown(f":{color}[{current_pct:.2f}%]")
+        with r_cols[4]:
+            st.caption(f"{date_added} {timestamp}")
+        with r_cols[5]:
+            # 🗑️ 删除按钮
+            # 这里的 key 必须唯一
+            if st.button("🗑️", key=f"del_{code}_{index}"):
+                db_manager.delete_candidate(code)
+                st.rerun()  # <--- 🟢 在片段内调用 rerun，只刷新这个片段！
+
+
 # ==========================================
 # 🎨 页面配置 (Page Config)
 # ==========================================
@@ -548,6 +687,10 @@ if level == -1:
     st.error("⛔ 触发熔断保护，停止扫描个股。请管住手！")
 else:
     with st.spinner('正在扫描全市场数据...'):
+        # 这里的 spinner 包裹缓存获取，避免点击按钮时重新转圈
+        if "data_map_cache" not in st.session_state:
+            st.session_state.data_map_cache = {}
+
         if no_filter:
             strategy_ids = []
         else:
@@ -561,7 +704,6 @@ else:
         if not data_map:
             st.warning("暂未获取到有效热点数据，可能是休市或接口波动。")
         else:
-            # 遍历板块
             # 遍历板块
             for bk_name, df in data_map.items():
                 with st.expander(f"📂 {bk_name}", expanded=True):
@@ -577,46 +719,49 @@ else:
                         if is_fallback:
                             st.warning("⚠️ 暂无符合【严格策略】的个股，以下为该板块【涨幅前 5】观察：")
 
+                        # 自定义表头
+                        h_cols = st.columns([1.2, 1.2, 1, 1, 1.5, 2, 1])
+                        headers = ["代码", "名称", "现价", "涨幅", "状态", "策略", "操作"]
+                        for i, h in enumerate(headers):
+                            h_cols[i].markdown(f"**{h}**")
 
-                        # ======================================
+                        st.markdown("---")
 
-                        # 高亮显示逻辑
-                        def highlight_status(val):
-                            color = ''
-                            if '连板' in str(val):
-                                color = 'background-color: #ffcccc'  # 浅红
-                            elif '炸板' in str(val):
-                                color = 'background-color: #ccffcc'  # 浅绿
-                            return color
+                        # 遍历行渲染
+                        for idx, row in df.iterrows():
+                            render_stock_row(idx, row, st.session_state.radar.db, bk_name)
+
+                        # # 高亮显示逻辑
+                        # def highlight_status(val):
+                        #     color = ''
+                        #     if '连板' in str(val):
+                        #         color = 'background-color: #ffcccc'  # 浅红
+                        #     elif '炸板' in str(val):
+                        #         color = 'background-color: #ccffcc'  # 浅绿
+                        #     return color
+                        #
+                        #
+                        # st.dataframe(
+                        #     df.style.map(highlight_status, subset=['状态']),
+                        #     width="stretch",  # <--- ✅ 新参数：拉伸填满
+                        #     hide_index=True,
+                        #     column_config={
+                        #         "代码": st.column_config.LinkColumn(
+                        #             "股票代码",
+                        #             help="点击跳转东方财富K线图",
+                        #             display_text=r"(\d{6})\.html",
+                        #             width="medium"
+                        #         )
+                        #     }
+                        # )
 
 
-                        st.dataframe(
-                            df.style.map(highlight_status, subset=['状态']),
-                            width="stretch",  # <--- ✅ 新参数：拉伸填满
-                            hide_index=True,
-                            column_config={
-                                "代码": st.column_config.LinkColumn(
-                                    "股票代码",
-                                    help="点击跳转东方财富K线图",
-                                    display_text=r"(\d{6})\.html",
-                                    width="medium"
-                                )
-                            }
-                        )
 
-# 4. 次日确认 (T+1 Check)
+
+# 4. 验证区域 (Validation Tab)
 st.markdown("---")
-st.markdown("### ✅ 选股验证 (最新记录)")
-
-with st.spinner('正在生成次日确认...'):
-    fallback_ids = selected_strategies if selected_strategies else [1, 2, 3]
-    t1_df, t1_msg = build_t1_confirmation("stock_data.db", fallback_ids)
-    if t1_msg:
-        st.info(t1_msg)
-    elif t1_df.empty:
-        st.info("暂无可确认的股票。")
-    else:
-        st.dataframe(t1_df, width="stretch", hide_index=True)
+# 调用新写的验证列表函数
+render_validation_tab(st.session_state.radar.db)
 
 # 页脚
 st.markdown("---")
