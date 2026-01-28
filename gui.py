@@ -25,10 +25,12 @@ def get_kline_url(code):
 
     return f"https://quote.eastmoney.com/{prefix}{code}.html"
 
+
 STRATEGY_LABELS = {
     1: "强势追涨",
     2: "尾盘潜伏",
-    3: "冲击涨停"
+    3: "冲击涨停",
+    4: "趋势波段"
 }
 
 
@@ -244,6 +246,8 @@ def build_t1_confirmation(db_path, fallback_strategy_ids):
         })
 
     return pd.DataFrame(results), ""
+
+
 # ==========================================
 # 🎨 页面配置 (Page Config)
 # ==========================================
@@ -266,11 +270,13 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+
 # 定义缓存函数，TTL=180秒 (3分钟刷新一次足够了)
 @st.cache_data(ttl=60)
 def get_cached_raw_data(strategy_ids, valid_boards, _radar_instance):
     # 这里调用 radar 实例的方法
     return _radar_instance.get_raw_data(strategy_ids, valid_boards)
+
 
 # ==========================================
 # 🧠 逻辑继承与适配 (Adapter)
@@ -321,7 +327,7 @@ class StreamlitRadar(stock_radar.StockRadarPro):
 
             # 🟡 2. 兜底逻辑
             if df.empty and hasattr(self, '_fetch_sina_concept_stocks'):
-                 df = self._fetch_sina_concept_stocks(concept_name)
+                df = self._fetch_sina_concept_stocks(concept_name)
 
             if df.empty: return []
 
@@ -485,11 +491,12 @@ with st.sidebar:
         # 策略选择
         selected_strategies = st.multiselect(
             "选择战法模式(可多选):",
-            options=[1, 2, 3],
+            options=[1, 2, 3, 4],
             format_func=lambda x: {
                 1: "🚀 早盘强势追涨 (9:30-10:30)",
                 2: "🐟 尾盘潜伏低吸 (14:30-15:00)",
-                3: "⚡ 冲击涨停博弈 (激进)"
+                3: "⚡ 冲击涨停博弈 (激进)",
+                4: "📈 趋势波段低吸 (稳健N型)"
             }[x],
             key="selected_strategies"
         )
@@ -513,7 +520,6 @@ with st.sidebar:
     # === ✨ 修改结束 ===
 
     st.info("💡 提示：调整上方选项后，请点击【执行扫描】按钮生效。")
-
 
 # 2. 顶部：大盘情绪红绿灯
 st.title("🚀 A股短线狙击雷达")

@@ -370,6 +370,16 @@ class StockRadarPro:
                 if strategy_ids:
                     is_selected, strategy_tag = StrategyFilter.apply_strategies(row, threshold, strategy_ids)
 
+                # 🛑 【新增】针对策略4 (趋势波段) 的二次核查
+                # 只有当基础条件通过(is_selected=True) 且 包含策略4时，才去查历史 (节省时间)
+                if is_selected and (4 in strategy_ids):
+                    # 如果是策略4，必须额外满足历史趋势条件
+                    if "趋势" in strategy_tag:
+                        print(f"  > 正在核查 {name} 的K线趋势...") # 调试用
+                        trend_ok = self._check_history_trend(code)
+                        if not trend_ok:
+                            is_selected = False  # 趋势坏了，淘汰！
+
                 if is_selected:
                     streak_info = ""
                     if code in self.zt_data:
@@ -420,6 +430,48 @@ class StockRadarPro:
             final_results.append(display_str)
 
         return final_results
+
+
+    def _check_history_trend(self, code):
+        """
+        [耗时操作] 获取个股历史K线，核查趋势条件:
+        1. 近20日有涨停
+        2. 10日线 > 20日线
+        3. EXPMA 多头 (12 > 26)
+        """
+        try:
+            # 获取近 60 天日线数据 (足以计算均线)
+            df = ak.stock_zh_a_hist(symbol=code, period="daily", adjust="qfq")
+            if df.empty or len(df) < 30: return False
+
+            # 1. 检查近 20 日是否有涨停
+            # 简单判定: 涨幅 > 9.5% 视为涨停 (创业板20cm暂忽略，严谨可加)
+            recent_20 = df.tail(20)
+            has_limit_up = (recent_20['涨跌幅'] > 9.5).any()
+            if not has_limit_up:
+                return False
+
+            # 2. 计算均线 (MA10, MA20)
+            # 取最后一天(今天)或倒数第二天(昨天收盘)均可，这里取最新
+            ma10 = df['收盘'].rolling(10).mean().iloc[-1]
+            ma20 = df['收盘'].rolling(20).mean().iloc[-1]
+
+            if ma10 <= ma20:
+                return False
+
+            # 3. 计算 EXPMA (EMA12, EMA26)
+            # pandas ewm span=12 -> alpha=2/(12+1)
+            ema12 = df['收盘'].ewm(span=12, adjust=False).mean().iloc[-1]
+            ema26 = df['收盘'].ewm(span=26, adjust=False).mean().iloc[-1]
+
+            if ema12 <= ema26:
+                return False
+
+            return True
+
+        except Exception as e:
+            print(f"历史数据获取失败 {code}: {e}")
+            return False
 
     def run(self):
         global CURRENT_STRATEGY

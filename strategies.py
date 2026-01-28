@@ -206,3 +206,62 @@ class StrategyFilter:
             return False, ""
 
         return True, "⚡ [冲击涨停]"
+
+
+    @staticmethod
+    def check_trend_breakout(row, limit_threshold):
+        """
+        策略 4: 【趋势波段低吸】
+        逻辑: 趋势多头 + 股性活跃 + 当日蓄势启动
+        """
+        pct = StrategyFilter._safe_num(row.get('涨跌幅', 0), 0)
+        price = StrategyFilter._safe_num(row.get('现价', 0), 0)
+        open_p = StrategyFilter._safe_num(row.get('今开', row.get('open', 0)), 0)  # 兼容新浪列名
+        amount = StrategyFilter._safe_num(row.get('成交额', row.get('amount', 0)), 0)
+        volume = StrategyFilter._safe_num(row.get('成交量', row.get('volume', 0)), 0)  # 手
+        turnover = StrategyFilter._safe_num(row.get('换手', 0), 0)
+        volume_ratio = StrategyFilter._safe_num(row.get('量比', 0), 0)
+        mktcap = StrategyFilter._safe_num(row.get('总市值', row.get('mktcap', 0)), 0)  # 新浪通常单位是万
+
+        # 1. 基础门槛: 今日收阳 + 涨幅 3%~6%
+        if not (3.0 <= pct <= 6.0):
+            return False, ""
+
+        # 2. 换手率: 5% ~ 10% (温和放量)
+        if not (5.0 <= turnover <= 10.0):
+            return False, ""
+
+        # 3. 量比 > 1 (有资金流入)
+        # 注: 新浪源量比常为0，如果为0暂时放行，由后续历史量能校验
+        if volume_ratio > 0 and volume_ratio <= 1.0:
+            return False, ""
+
+        # 4. 市值 < 200亿 (中小盘)
+        # 新浪mktcap单位通常是"万"，200亿 = 200,0000 万
+        # 如果获取到的数值非常小(比如<10000)，可能是单位问题(亿)，做个兼容
+        cap_limit_wan = 200 * 10000
+        if mktcap > cap_limit_wan:
+            return False, ""
+
+        # 5. 【新增条件】 开盘 > -2%  OR  站上分时均线 (VWAP)
+        # 计算开盘涨幅: (open - pre_close) / pre_close
+        # pre_close = price / (1 + pct/100)
+        if price == 0: return False, ""
+        pre_close = price / (1 + pct / 100)
+        open_pct = (open_p - pre_close) / pre_close * 100
+
+        # 计算分时均价 (VWAP) = 成交额 / (成交量 * 100)
+        # 注意: volume单位通常是手(100股)，amount是元
+        is_above_vwap = False
+        if volume > 0:
+            vwap = amount / (volume * 100)
+            if price > vwap:
+                is_above_vwap = True
+
+        # 判定: 两个条件满足其一即可
+        condition_open = (open_pct > -2.0)
+        if not (condition_open or is_above_vwap):
+            return False, ""
+
+        # 6. 标记为待查历史 (后续在 radar 里查均线)
+        return True, "📈 [趋势波段]"
