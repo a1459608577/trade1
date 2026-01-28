@@ -3,6 +3,7 @@
 
 import math
 
+
 class StrategyFilter:
     """
     短线选股策略集合 (Pro 优化版)
@@ -49,14 +50,16 @@ class StrategyFilter:
                     sid = int(item)
                 except (TypeError, ValueError):
                     continue
-                if sid in (1, 2, 3):
+                # ✅ 修改：加入 4
+                if sid in (1, 2, 3, 4):
                     ids.append(sid)
             return sorted(set(ids))
         try:
             sid = int(strategy)
         except (TypeError, ValueError):
             return []
-        if sid in (1, 2, 3):
+        # ✅ 修改：加入 4
+        if sid in (1, 2, 3, 4):
             return [sid]
         return []
 
@@ -71,7 +74,7 @@ class StrategyFilter:
                 ok, tag = StrategyFilter.check_tail_end_lurk(row, limit_threshold)
             elif sid == 3:
                 ok, tag = StrategyFilter.check_weak_to_strong(row, limit_threshold)
-            elif sid == 4:
+            elif sid == 4:  # ✅ 新增战法 4 调用
                 ok, tag = StrategyFilter.check_trend_breakout(row, limit_threshold)
             else:
                 ok, tag = False, ""
@@ -97,8 +100,6 @@ class StrategyFilter:
         price = StrategyFilter._safe_num(row.get('现价', 0), 0)
         high = StrategyFilter._safe_num(row.get('最高', price), price)
         low = StrategyFilter._safe_num(row.get('最低', price), price)
-        # 注意：部分接口 '流通市值' 单位不统一，这里假设AkShare返回的是亿或万，需根据实际调整
-        # 这里暂不加硬性市值过滤，依靠换手率来筛选活跃度
 
         # 1. 涨幅区间：强势启动但不临涨停
         upper = limit_threshold * 0.85
@@ -209,7 +210,7 @@ class StrategyFilter:
 
         return True, "⚡ [冲击涨停]"
 
-
+    # ✅ 新增：策略 4 实现
     @staticmethod
     def check_trend_breakout(row, limit_threshold):
         """
@@ -218,9 +219,9 @@ class StrategyFilter:
         """
         pct = StrategyFilter._safe_num(row.get('涨跌幅', 0), 0)
         price = StrategyFilter._safe_num(row.get('现价', 0), 0)
-        open_p = StrategyFilter._safe_num(row.get('今开', row.get('open', 0)), 0)  # 兼容新浪列名
+        open_p = StrategyFilter._safe_num(row.get('今开', row.get('open', 0)), 0)
         amount = StrategyFilter._safe_num(row.get('成交额', row.get('amount', 0)), 0)
-        volume = StrategyFilter._safe_num(row.get('成交量', row.get('volume', 0)), 0)  # 手
+        volume = StrategyFilter._safe_num(row.get('成交量', row.get('volume', 0)), 0)
         turnover = StrategyFilter._safe_num(row.get('换手', 0), 0)
         volume_ratio = StrategyFilter._safe_num(row.get('量比', 0), 0)
         mktcap = StrategyFilter._safe_num(row.get('总市值', row.get('mktcap', 0)), 0)  # 新浪通常单位是万
