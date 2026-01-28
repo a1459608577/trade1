@@ -71,6 +71,8 @@ class StrategyFilter:
                 ok, tag = StrategyFilter.check_tail_end_lurk(row, limit_threshold)
             elif sid == 3:
                 ok, tag = StrategyFilter.check_weak_to_strong(row, limit_threshold)
+            elif sid == 4:
+                ok, tag = StrategyFilter.check_trend_breakout(row, limit_threshold)
             else:
                 ok, tag = False, ""
             if ok:
